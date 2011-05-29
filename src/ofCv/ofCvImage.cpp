@@ -4,7 +4,7 @@
 #include "ofCvColorImage.h"
 #include "ofCvFloatImage.h"
 
-
+#include <opencv/cv.h>
 
 
 ofCvImage::ofCvImage() {

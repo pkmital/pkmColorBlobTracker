@@ -1,12 +1,22 @@
 #include "testApp.h"
+#include <stdlib.h>
 
+testApp::~testApp()
+{
+	fclose(fp);
+}
 
 //--------------------------------------------------------------
-void testApp::setup(){
+void testApp::setup() {
+	bTrain = false;
+	bCalibrated = false;
 	
-	//for this video these radial settings do a nice un fish eye angle effect
-	float radialX = -0.176;
-	float radialY =  0.024;
+	
+	MODE = MODE_CALIBRATION;
+	currentView = currentPoint = 0;
+	initializeCameraMatrices();
+	initializeObjectPoints();
+	initOutputFile();
 	
 #ifdef _USE_LIVE_VIDEO
 	vidGrabber[0].setVerbose(true);
@@ -14,166 +24,290 @@ void testApp::setup(){
 	//vidGrabber[1].setVerbose(true);
 	//vidGrabber[1].initGrabber(W,H);
 #else
-	vidPlayer.loadMovie(ofToDataPath("test1.mov"));
+	vidPlayer.loadMovie(ofToDataPath("test2.mov"));
 	vidPlayer.setLoopState(OF_LOOP_NORMAL);
 	vidPlayer.play();
 #endif
+	
 	/*
 	gui.setup("warp", 0, 0, 1024, 768);
 	gui.addPanel("warper", 3);
 	gui.setWhichPanel(0);
 	
-	gui.addSlider("radial x/unwarp ", "RAD_X", radialX, -0.2, 0.2, false);
-	gui.addSlider("radial y", "RAD_Y", radialY, -0.2, 0.2, false);
-
-	gui.addSlider("tang x", "TAN_X", 0.0, -0.3, 0.3, false);
-	gui.addSlider("tang y", "TAN_Y", 0.0, -0.3, 0.3, false);
+	hue_min_threshold = 170;
+	hue_max_threshold = 255;
 	
-	gui.addSlider("focal x", "FOC_X", W/2,  -W, W, false);
-	gui.addSlider("focal y", "FOC_Y", H/2,  -H, H, false);
-
-	gui.addSlider("center x", "CEN_X", W/2,  0, W, false);
-	gui.addSlider("center y", "CEN_Y", H/2,  0, H, false);	
-	
-	gui.setWhichColumn(1);
-	gui.addDrawableRect("original", &grayImage[0], 320, 240);
-	gui.addDrawableRect("un-warped", &warpedImage[0], 320, 240);
-	gui.setWhichColumn(2);
-	gui.addDrawableRect("original", &grayImage[1], 320, 240);
-	gui.addDrawableRect("un-warped", &warpedImage[1], 320, 240);
-	 */
-		
-    colorImg[0].allocate(W,H);
-	grayImage[0].allocate(W,H);
-	warpedImage[0].allocate(W,H);
-	/*
-    colorImg[1].allocate(W,H);
-	grayImage[1].allocate(W,H);
-	warpedImage[1].allocate(W,H);
+	gui.addSlider("Hue Min Threshold", "H_MIN", hue_min_threshold, 0, 179, true);
+	gui.addSlider("Hue Max Threshold", "H_MAX", hue_max_threshold, 0, 179, true);
 	*/
 	
-	// Background model variables
-	grayBg.allocate(W,H);
-	grayDiff.allocate(W,H);
 	
-	pGMM=cvCreatePixelBackgroundGMM(W,H);
-	pGMMTiming = 30.0;
-	pGMM->fAlphaT = 1. / pGMMTiming;
-	pGMM->fTb = 5*4;
-	pGMM->fSigma = 30;
-	pGMM->bShadowDetection = true;
-	bLearnBackground = true;
-	threshold = 20;
-	block_size = 9;
+	//reserve memory for cv images
+	rgb.allocate(W, H);
+	hsb.allocate(W, H);
+	hue.allocate(W, H);
+	sat.allocate(W, H);
+	bri.allocate(W, H);
+	filtered.allocate(W, H);
 	
-	low_threshold = 16;	frame_num = 0;
+	blobTracker.setListener(this);
 	
-	bLearnBackground = true;
-	threshold = 15;
-	option1 = true;	// learn a background once
-	
-	inImage = new unsigned char[W*H];
-	outImage = new unsigned char[W*H];
-	
-    blobTracker.setListener( this );
-	orientation = 0.0f;
-	
-	ofSetWindowShape(WINDOW_WIDTH, WINDOW_HEIGHT);
+	ofSetWindowShape(W*3, H*2);
 	ofSetVerticalSync(true);
 	ofSetFrameRate(30);
 	ofSetBackgroundAuto(true);
 	ofBackground(0,0,0);
+}
+void testApp::initOutputFile()
+{
+	char buf[80];
+	sprintf(buf, "%02d%02d%02d-%02d.%02d.%02d.txt\n",
+					ofGetDay(), ofGetMonth(), ofGetYear(),
+			ofGetHours(), ofGetMinutes(), ofGetSeconds());
+	fp = fopen(ofToDataPath(buf).c_str(), "w+");
+}
+
+void testApp::initializeCameraMatrices()
+{
+	double focalX = CAPTURE_WIDTH_OVER_2;
+	double focalY = CAPTURE_HEIGHT_OVER_2;
+	double centerX = CAPTURE_WIDTH_OVER_2;
+	double centerY = CAPTURE_HEIGHT_OVER_2;
+	double tangentDistX = 0.0;
+	double tangentDistY = 0.0;
+	double radialDistX = 0;//-0.150;		
+	double radialDistY = 0;//0.024;
+	double camIntrinsics[] = { focalX, 0, centerX, 0, focalY, centerY, 0, 0, 1 };
+	double distortionCoeffs[] = { radialDistX, radialDistY, tangentDistX, tangentDistY, 0 };
+	cameraMatrix = cv::Mat(3, 3, CV_64F, camIntrinsics);
+	distCoeffs = cv::Mat(1, 4, CV_64F, distortionCoeffs); 
+	vector<double> rv = vector<double>(3); 
+	rvec = cv::Mat(rv); 
+	vector<double> tv = vector<double>(3); 
+	tv[0]=0;tv[1]=0;tv[2]=0; 
+	tvec = cv::Mat(tv); 
+	rotationMatrix = cv::Mat(3,3,CV_64F);
+	homographyMatrix = cv::Mat(3,3,CV_64F);
 	
-	bBlob = false;
+}
+
+void testApp::initializeObjectPoints()
+{
+	vector<cv::Point2f> oP;
+	// 
+	//  1    2    3
+	//    10   11
+	//  4    5    6
+	//    12   13
+	//  7    8    9
+	//
 	
-	sender.setup("10.0.2.6", 12345);
+	for(int i = 0; i < NUM_VIEWS; i++)
+	{
+		oP.push_back(cv::Point2f(-1, 1));
+	}
+	for(int i = 0; i < NUM_VIEWS; i++)
+	{
+		oP.push_back(cv::Point2f(0, 1));
+	}
+	for(int i = 0; i < NUM_VIEWS; i++)
+	{
+		oP.push_back(cv::Point2f(1, 1));
+	}
+	for(int i = 0; i < NUM_VIEWS; i++)
+	{
+		oP.push_back(cv::Point2f(-1, 0));
+	}
+	for(int i = 0; i < NUM_VIEWS; i++)
+	{
+		oP.push_back(cv::Point2f(0, 0));
+	}
+	for(int i = 0; i < NUM_VIEWS; i++)
+	{
+		oP.push_back(cv::Point2f(1, 0));
+	}
+	for(int i = 0; i < NUM_VIEWS; i++)
+	{	
+		oP.push_back(cv::Point2f(-1, -1));
+	}
+	for(int i = 0; i < NUM_VIEWS; i++)
+	{
+		oP.push_back(cv::Point2f(0, -1));
+	}
+	for(int i = 0; i < NUM_VIEWS; i++)
+	{
+		oP.push_back(cv::Point2f(1, -1));
+	}
+	for(int i = 0; i < NUM_VIEWS; i++)
+	{
+		oP.push_back(cv::Point2f(0.5, 0.5));
+	}
 	
-	ofResetElapsedTimeCounter();
+	objectPoints = cv::Mat(oP);
 	
 }
 
 //--------------------------------------------------------------
-void testApp::update(){
-
+void testApp::update()
+{
 	ofBackground(0,0,0);
-	
 	gui.update();
 #ifdef _USE_LIVE_VIDEO
 	vidGrabber[0].grabFrame();
 	if (vidGrabber[0].isFrameNew())
 	{
-		inImage = vidGrabber[0].getPixels();
+		rgb.setFromPixels(vidGrabber[0].getPixels(),W,H);
 #else
 	vidPlayer.update();
 	if (vidPlayer.isFrameNew()) 
 	{
-		inImage = vidPlayer.getPixels();
+		rgb.setFromPixels(vidPlayer.getPixels(),W,H);
 #endif
-		colorImg[0].setFromPixels(inImage, W,H);
-	    grayImage[0] = colorImg[0];
-		orientationTracker.updateImage(grayImage[0].getCvImage());
-		if (bLearnBackground){
-			cvUpdatePixelBackgroundGMM(pGMM, inImage, outImage);
-			grayDiff.setFromPixels(outImage, W, H);
-		}
-		else {
-			cvPixelBackgroundGMMSubtraction(pGMM, inImage, outImage);
-			grayDiff.setFromPixels(outImage, W, H);
-
-		}
-
-		grayBg = grayDiff;
+		//mirror horizontal
+		//rgb.mirror(false, true);
 		
-		// subtraction and threshold
-		grayDiff.blur( block_size );
-		grayDiff.threshold( threshold );
-		//cvAdaptiveThreshold(grayDiff.getCvImage(), grayDiff.getCvImage(), 255, CV_ADAPTIVE_THRESH_MEAN_C, CV_THRESH_BINARY_INV, block_size, threshold);
-		//grayDiff.flagImageChanged();
 		
-		// blob tracking
-		contourFinder.findContours(grayDiff, 150, W*H/3, MAX_BLOBS, false);
-		blobTracker.trackBlobs( contourFinder.blobs );
+		// camera calibration
+		rgb.undistort(-0.150,					// radial dist x
+					  0.024,					// radial dist y
+					  0.0,						// tangent dist x
+					  0.0,						// tangent dist y
+					  CAPTURE_WIDTH_OVER_2,		// focal x
+					  CAPTURE_HEIGHT_OVER_2,	// focal y
+					  CAPTURE_WIDTH_OVER_2,		// center x
+					  CAPTURE_HEIGHT_OVER_2);	// center y
+		
+		
+		// duplicate rgb
+		hsb = rgb;
+		
+		// convert to hsb
+		hsb.convertRgbToHsv();
+		
+		// store the three channels as grayscale images
+		hsb.convertToGrayscalePlanarImages(hue, sat, bri);
+		
+		// blur
+		hue.blurGaussian(5);
+		
+		// filter image based on the hue value 
+		for (int i=0; i<W*H; i++) {
+			filtered.getPixels()[i] = ofInRange(hue.getPixels()[i],findHue-5,findHue+5) ? 255 : 0;
+		}
+		
+		// run the contour finder on the filtered image to find blobs with a certain hue
+		contours.findContours(filtered, 50, W*H/2, MAX_BLOBS, false);
+		blobTracker.trackBlobs( contours.blobs );
+	
+/*		// train the current point
+		if (bTrain && blobTracker.blobs.size() > 0) {
+			// if we have to view the current point more times
+			if (currentView < NUM_VIEWS) {
+				// keep the point
+				iP.push_back(cv::Point2f(blobTracker.blobs[0].center.x, 
+										 blobTracker.blobs[0].center.y));
+				currentView++;
+			}
+			
+			// we have enough views for this point, move on
+			if (currentView == NUM_VIEWS) {
+				bTrain = false;
+				currentPoint++;
+				currentView = 0;
+			}
+			
+			// we're done collecting all the points
+			if (currentPoint == NUM_CALIBRATION_PTS) {
+				calibrateUserPosition();
+			}
+		}
+*/
+		
 	}
-
 }
 
+void testApp::calibrateUserPosition()
+{
+	imagePoints = cv::Mat(iP);
+	
+#if 0
+
+	// do the fitting
+	solvePnP(objectPoints, imagePoints, cameraMatrix, distCoeffs, rvec, tvec, false);
+	
+	// output translation vector
+	cout << "translation vector:" << endl;
+	cv::MatConstIterator_<double> it = tvec.begin<double>(); 
+	cv::MatConstIterator_<double> it_end = tvec.end<double>(); 
+	for(;it != it_end; it++) 
+		cout << *it << endl; 
+	
+//	for(;it != it_end; it++) 
+//		cout << *it << endl; 
+	
+	
+	// output rotation vector
+	cout << "rotation vector:" << endl;
+	it = rvec.begin<double>(); 
+	it_end = rvec.end<double>(); 
+	for(;it != it_end; it++) 
+		cout << *it << endl; 
+	
+	
+	cv::Rodrigues(cv::Mat(rvec), rotationMatrix);
+	cout << "Rotation Matrix:" << endl;
+	
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) {
+			cout << rotationMatrix.at<double>(i,j) << " ";
+			
+		}
+		cout << endl;
+	}
+#else
+	homographyMatrix = findHomography(objectPoints, imagePoints, CV_RANSAC);//CV_LMEDS);
+	cout << "homographyMatrix:" << endl;
+	
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) {
+			cout << homographyMatrix.at<double>(i,j) << " ";
+			
+		}
+		cout << endl;
+	}
+	
+#endif
+	MODE = MODE_TRACKING;
+}
+	
 //--------------------------------------------------------------
 void testApp::draw(){
-	gui.draw();
+	ofSetColor(255,255,255);
 	
-	ofSetColor( 0xffffff );
-	
-	colorImg[0].draw(20,20);
-	
-	grayDiff.draw(20+W+20+W+20,20);	
-	
-	// debug text output
-	ofSetColor(0,255,131);
-	char buf[256];
-	if (bLearnBackground) {
-		sprintf(buf, "learning background...\n['+'] or ['-'] to change threshold: %d\n", threshold);
-	}
-	else {
-		sprintf(buf, "['space'] to learn background\n['+'] or ['-'] to change threshold: %d\n", threshold);
-	}
-	ofDrawBitmapString( buf, 20,290 );
-	
-	grayBg.draw(20+W+20, 20);
-	ofSetColor(0,255,131);
-	sprintf(buf, "['9'] or ['0'] to change gmm timing: %f\n['['] or [']'] to change block size: %d", pGMMTiming, block_size);
-	ofDrawBitmapString( buf, 20,316 );
-	
+	// draw all cv images
+	rgb.draw(0,0);
+	hsb.draw(W*2,0);
+	hue.draw(0,H);
+	sat.draw(W,H);
+	bri.draw(W*2,H);
+	filtered.draw(W,0);
+	//contours.draw(0,0);
 	
 	// blob drawing
-	blobTracker.draw(20+W+20+W+20, 20);
+	blobTracker.draw(0,0);
 	
-	if (bBlob) {
-		orientationTracker.draw(20+W+20+W+20, 20);
+	char buf[80];
+	sprintf(buf, "current point: %d", currentPoint+1);
+	ofDrawBitmapString(buf, 20, 20);
+	if(MODE == MODE_CALIBRATION)
+		sprintf(buf, "MODE: Calibration (Click the %d points)", NUM_CALIBRATION_PTS);
+	else {
+		sprintf(buf, "MODE: Tracking (Click to track a color)");
 	}
+	ofDrawBitmapString(buf, 20, 50);
+
 }
 
-
-//--------------------------------------------------------------
 void testApp::keyPressed  (int key){
 	switch (key){
 #ifdef _USE_LIVE_VIDEO
@@ -184,48 +318,62 @@ void testApp::keyPressed  (int key){
 		case 'f':
 			ofToggleFullscreen();
 			break;
-//		case 'd':
-//			isdebug = !isdebug;
-//			break;
-//		case 'm':
-//			drawmovie = !drawmovie;
-//			break;
-//		case 'r':
-//			dorandom = !dorandom;
-//			break;
-			
-			
+		
 		case ' ':
-			bLearnBackground = !bLearnBackground;
+			iP.clear();
+			currentPoint = 0;
 			break;
-		case '=': case '+':
-			threshold ++;
-			if (threshold > 255) threshold = 255;
+		case '1':
+			MODE = MODE_CALIBRATION;
 			break;
-		case '-':
-			threshold --;
-			if (threshold < 0) threshold = 0;
+		case '2':
+			MODE = MODE_TRACKING;
 			break;
-		case '9':
-			pGMMTiming -= 1.0;
-			pGMMTiming = MAX(5,pGMMTiming);
-			pGMM->fAlphaT = 1. / pGMMTiming;
+		default:
 			break;
-		case '0':
-			pGMMTiming += 1.0;
-			pGMMTiming = MIN(320.0,pGMMTiming);
-			pGMM->fAlphaT = 1. / pGMMTiming;
-			break;
-		case '[':
-			block_size = MAX(5,block_size-=2);
-			break;
-		case ']':
-			block_size = MIN(53,block_size+=2);
-			break;
-			
 	}
 }
+	
+//--------------------------------------------------------------
+void testApp::mousePressed(int x, int y, int button) {
+	
+	if (MODE == MODE_CALIBRATION) {
+		// if we have to view the current point more times
+		while (currentView < NUM_VIEWS) {
+			// keep the point
+			float noise = (((random() % 100) / 100.0) - 0.5) * 2.0;
+			float noise2 = (((random() % 100) / 100.0) - 0.5) * 2.0;
+			float x_pt = (x+noise)/((float)W);
+			float y_pt = (y+noise2)/((float)H);
+			iP.push_back(cv::Point2f(x_pt,y_pt));
+			printf("x: %f, y: %f\n", x_pt, y_pt);
+			currentView++;
+		}
+		
+		// we have enough views for this point, move on
+		bTrain = false;
+		currentPoint++;
+		currentView = 0;
+		
+		
+		// we're done collecting all the points
+		if (currentPoint == NUM_CALIBRATION_PTS) {
+			calibrateUserPosition();
+		}		
+	}
+	else if(MODE == MODE_TRACKING) {
+		// calculate local mouse x,y in image
+		int mx = x % W;
+		int my = y % H;
+		
+		// get hue value on mouse position
+		findHue = hue.getPixels()[my*W+mx];
+	}
 
+	
+	gui.mousePressed(x, y, button);
+}
+	
 //--------------------------------------------------------------
 void testApp::mouseMoved(int x, int y ){
 }
@@ -236,53 +384,31 @@ void testApp::mouseDragged(int x, int y, int button){
 }
 
 //--------------------------------------------------------------
-void testApp::mousePressed(int x, int y, int button){
-	gui.mousePressed(x, y, button);
-}
-
-//--------------------------------------------------------------
 void testApp::mouseReleased(int x, int y, int button){
 	gui.mouseReleased();
 }
 
 //--------------------------------------------------------------
 void testApp::windowResized(int w, int h){
-
-}
-
-
-//--------------------------------------------------
-void testApp::blobOn( int x, int y, int id, int order ) {
-
-	printf("blobOn() - id:%d\n", id);
-
-	bBlob = true; 
-}
-
-void testApp::blobMoved( int x, int y, int id, int order) {
-	printf("blobMoved() - id:%d\n", id);
 	
-    // full access to blob object ( get a reference)
-    ofCvTrackedBlob blob = blobTracker.getById( id );
-	
-	orientation = orientationTracker.getOrientation(blob) * 180.0f / PI;
-	printf("ori: %f\n", orientation);
-	ofxOscMessage m;
-	m.setAddress("/listener/position");
-	blob_x = (x / (float)W - 0.5) * 5.0f;
-	blob_y = (y / (float)H - 0.5) * 5.0f;
-	printf("%f, %f\n", blob_x, blob_y);
-	m.addFloatArg(blob_x);
-	m.addFloatArg(blob_y);
-	m.addFloatArg(1.0f);
-	sender.sendMessage(m);
-	
-	bBlob = true;
 }
-
-void testApp::blobOff( int x, int y, int id, int order ) {
-		
-	bBlob = false; 
-	printf("blobOff() - id:%d\n", id);
+	
+void testApp::blobOn( int x, int y, int id, int order )
+{
+	
 }
-
+void testApp::blobMoved( int x, int y, int id, int order )
+{
+	if (MODE==MODE_TRACKING) {
+		fprintf(fp, "%02d%02d%02d-%02d:%02d.%02d:%f,%f\n",
+				ofGetDay(), ofGetMonth(), ofGetYear(),
+				ofGetHours(), ofGetMinutes(), ofGetSeconds(),
+				(x-W/2.0f)/(W/2.0f),
+				(y-H/2.0f)/(H/2.0f));
+	}
+}
+void testApp::blobOff( int x, int y, int id, int order )
+{
+	
+}
+	

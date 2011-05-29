@@ -1,7 +1,7 @@
 
 #include "ofCvContourFinder.h"
 
-
+#include <opencv/cv.h>
 
 static int qsort_carea_compare( const void* _a, const void* _b) {
 	int out = 0;

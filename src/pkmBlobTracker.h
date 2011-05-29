@@ -4,7 +4,7 @@
 
 
 #pragma once
-
+#include <opencv2/opencv.hpp>
 #include "ofCvBlobTracker.h"
 #include "ofMain.h"
 
@@ -47,7 +47,7 @@ public:
 	{
 		swap(prevGrayImage, grayImage);
 		
-		cvCopyImage(img, grayImage);
+		cvCopy(img, grayImage);
 	}
 	
 	void reInit()

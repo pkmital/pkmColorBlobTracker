@@ -2,7 +2,7 @@
 #define OF_CV_CONSTANTS_H
 
 #include <iostream>
-#include "cv.h"
+#include <opencv2/opencv.hpp>
 #include "ofCvBlob.h"
 #include "ofCvTrackedBlob.h"
 
